@@ -1,0 +1,11 @@
+node_modules/
+.npm-cache/
+.hardhat-home/
+artifacts/
+cache/
+dist/
+.env*
+*keystore*.json
+
+.fundsheld-keys/
+.mainnet-local/

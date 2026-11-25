@@ -1,0 +1,27 @@
+{
+  "mainnet": {
+    "name": "QIE Mainnet",
+    "chainId": 1990,
+    "rpc": "https://rpc1mainnet.qie.digital",
+    "fallbackRpcs": ["https://rpc2mainnet.qie.digital"],
+    "explorer": "https://mainnet.qie.digital",
+    "token": "0x3F43DA82eC9A4f5285F10FaF1F26EcA7319E5DA5",
+    "currency": {"name":"QIE","symbol":"QIE","decimals":18}
+  },
+  "testnet": {
+    "name": "QIE Testnet",
+    "chainId": 1983,
+    "rpc": "https://rpc5testnet.qie.digital",
+    "fallbackRpcs": ["https://rpc4testnet.qie.digital"],
+    "explorer": "https://testnet.qie.digital",
+    "currency": {"name":"QIE","symbol":"QIE","decimals":18}
+  },
+  "local": {
+    "name": "FundsHeld Local",
+    "chainId": 31337,
+    "rpc": "http://127.0.0.1:8545",
+    "fallbackRpcs": [],
+    "explorer": "",
+    "currency": {"name":"Local ETH","symbol":"ETH","decimals":18}
+  }
+}

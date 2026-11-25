@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Create and verify on-chain reserved funds on QIE.">
+  <title>FundsHeld</title>
+</head>
+<body>
+  <header class="top"><div class="shell bar">
+    <a class="brand" href="/"><span aria-hidden="true">FH</span> FundsHeld</a>
+    <div class="controls"><span id="network"></span><button id="connect" type="button">Connect wallet</button></div>
+  </div></header>
+  <main class="shell">
+    <div id="message" hidden>
+      <p id="message-text" role="status" aria-live="polite"></p>
+      <div id="confirmed-proof" hidden>
+        <div class="actions">
+          <a id="confirmed-proof-link"></a>
+          <button id="copy-confirmed-proof" type="button">Copy</button>
+        </div>
+      </div>
+    </div>
+    <div id="content" aria-busy="true"></div>
+  </main>
+  <script type="module" src="/web/app.js"></script>
+</body>
+</html>

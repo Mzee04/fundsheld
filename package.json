@@ -1,0 +1,26 @@
+{
+  "name": "fundsheld",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "node --require ./scripts/hardhat-paths.cjs ./node_modules/hardhat/internal/cli/bootstrap.js test",
+    "compile": "node --require ./scripts/hardhat-paths.cjs ./node_modules/hardhat/internal/cli/bootstrap.js compile",
+    "node": "node --require ./scripts/hardhat-paths.cjs ./node_modules/hardhat/internal/cli/bootstrap.js node --hostname 127.0.0.1",
+    "deploy:local": "node --require ./scripts/hardhat-paths.cjs ./node_modules/hardhat/internal/cli/bootstrap.js run scripts/deploy.cjs --network localhost",
+    "deploy:testnet": "node --require ./scripts/hardhat-paths.cjs ./node_modules/hardhat/internal/cli/bootstrap.js run scripts/deploy.cjs --network qieTestnet",
+    "dev": "vite --host 127.0.0.1",
+    "build": "npm run compile && vite build",
+    "test:ui": "npm run compile && node --require ./scripts/hardhat-paths.cjs scripts/local-ui.mjs",
+    "deploy:mainnet": "node --require ./scripts/hardhat-paths.cjs ./node_modules/hardhat/internal/cli/bootstrap.js run scripts/deploy.cjs --network qieMainnet"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "5.4.0",
+    "ethers": "6.15.0"
+  },
+  "devDependencies": {
+    "hardhat": "2.28.6",
+    "linkedom": "0.18.12",
+    "solc": "0.8.28",
+    "vite": "7.3.1"
+  }
+}
