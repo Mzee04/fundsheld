@@ -2,10 +2,10 @@ Prove you have the money to one person at a time, never to two at once.
 
 Ada deposits 5,000 QUSDC and gives Landlord A a proof link earmarking all 5,000. While the earmark is pending, Ada can revoke it. Landlord A acknowledges the proof, which keeps the full 5,000 held in the vault for them until expiry. Landlord A cannot claim or withdraw the money; it only shows that Ada cannot spend it or promise it to anyone else before expiry. Ada then tries to earmark the same funds for Landlord B, and FundsHeld refuses because her free balance is zero.
 
-- Live URL — TBD
+- Live URL — https://fundsheld-phi.vercel.app
 - Mainnet vault (verified): [0xd8e94A1f60F2DE2899297D5583b8C6Cd279d68d8](https://mainnet.qie.digital/address/0xd8e94A1f60F2DE2899297D5583b8C6Cd279d68d8) on QIE Mainnet (chain 1990). Demo transactions: [DEMO_TXS.md](DEMO_TXS.md)
 - Mainnet QUSDC — [0x3F43DA82eC9A4f5285F10FaF1F26EcA7319E5DA5](https://mainnet.qie.digital/address/0x3F43DA82eC9A4f5285F10FaF1F26EcA7319E5DA5)
-- Demo video — TBD
+- Demo video — https://youtu.be/Wi4ImYqDsWc
 - Team — TBD
 
 ## How it works
