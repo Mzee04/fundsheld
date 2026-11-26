@@ -43,7 +43,7 @@ async function deploy(provider, chain, existingToken) {
   } else {
     const keystorePath = process.env.FUNDSHELD_KEYSTORE;
     const password = process.env.FUNDSHELD_KEYSTORE_PASSWORD;
-    if (!keystorePath || !password) throw Error("Configure the encrypted keystore and password locally.");
+    if (!keystorePath || password === undefined) throw Error("Configure the encrypted keystore and password locally.");
     const wallet = await ethers.Wallet.fromEncryptedJson(fs.readFileSync(keystorePath, "utf8"), password);
     signer = wallet.connect(provider);
     if (await provider.getBalance(signer.address) === 0n) throw Error("Fund the deployer with network gas.");

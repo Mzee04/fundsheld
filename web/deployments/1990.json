@@ -1,0 +1,9 @@
+{
+  "chainId": 1990,
+  "token": "0x3F43DA82eC9A4f5285F10FaF1F26EcA7319E5DA5",
+  "vault": "0xd8e94A1f60F2DE2899297D5583b8C6Cd279d68d8",
+  "decimals": 6,
+  "symbol": "QUSDC",
+  "deploymentBlock": 12175417,
+  "vaultTransaction": "0x6514621f98560f16239bf4d6b89b20ac7b56fa51449cedff837df64963e24cca"
+}
