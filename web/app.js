@@ -1,4 +1,4 @@
-import { BrowserProvider, Contract, formatUnits, getAddress, hexlify, parseUnits, toQuantity, ZeroHash } from "ethers";
+import { BrowserProvider, Contract, formatUnits, getAddress, hexlify, parseUnits, toQuantity, ZeroAddress, ZeroHash } from "ethers";
 import networks from "../network.json";
 import vaultArtifact from "../artifacts/contracts/FundsHeldVault.sol/FundsHeldVault.json";
 import tokenArtifact from "../artifacts/contracts/MockQUSDC.sol/MockQUSDC.json";
@@ -116,15 +116,16 @@ const errorMessages = {
   ReentrancyGuardReentrantCall: "The vault is already processing an action.",
   VaultMissing: "No vault contract was found at the configured address on this network.",
   TokenMismatch: "The vault on this network uses a different token than the app expects.",
+  VaultVersion: "The vault at the configured address is an older version than this app build. Use the app build that matches it.",
   RpcConflict: "The RPC endpoints returned different data for the same block. Try again shortly.",
 };
 function errorText(error) {
   return errorMessages[error.code] ?? errorMessages[revertName(error)] ?? error.shortMessage ?? error.message ?? "Something went wrong.";
 }
 function statusBadge(mark) {
-  const labels = ["Pending — owner can still cancel", `Locked for the named reader until ${date(mark.verified.expiry)}`, "Expired", "Revoked"];
+  const labels = ["Pending — owner can still cancel", `Locked for the named reader until ${date(mark.verified.expiry)}`, "Expired", "Revoked", "Released early by the reader"];
   if (!(mark.status in labels)) return '<span class="status expired">Unknown status</span>';
-  return `<span class="status ${["pending", "locked", "expired", "revoked"][mark.status]}">${labels[mark.status]}</span>`;
+  return `<span class="status ${["pending", "locked", "expired", "revoked", "released"][mark.status]}">${labels[mark.status]}</span>`;
 }
 
 function codedError(code) {
@@ -143,6 +144,9 @@ async function checkDeployment(at) {
   try { vaultToken = await vault.token({ blockTag: at.blockTag }); }
   catch { throw codedError("VaultMissing"); }
   if (tokenCode === "0x" || getAddress(vaultToken) !== getAddress(deployment.token)) throw codedError("TokenMismatch");
+  // This build speaks the v2 vault interface. Refuse to read an older vault with it.
+  try { await vault.activeEarmarkSlots(ZeroAddress, { blockTag: at.blockTag }); }
+  catch { throw codedError("VaultVersion"); }
 }
 
 async function snapshot() {
@@ -217,9 +221,10 @@ function showProof(mark) {
         <dt>Network and vault</dt><dd>${escapeHtml(chain.name)} (chain ${chain.chainId}) · ${scope.vault}</dd>
         ${noteRow(verified)}
       </dl>
-      <p class="honest">After the named reader acknowledges, these funds stay in the vault for that reader until expiry: the owner cannot withdraw or cancel them before then. The reader cannot claim or withdraw them. At expiry they return to the owner’s free balance. Before acknowledgment, the owner can cancel at any time.</p>
+      <p class="honest">After the named reader acknowledges, these funds stay in the vault for that reader until expiry: the owner cannot withdraw or cancel them before then. The reader cannot claim or withdraw them. At expiry, or if the reader releases them early, they return to the owner’s free balance. Before acknowledgment, the owner can cancel at any time.</p>
       <div class="actions">
         ${canAcknowledge ? `<button data-action="acknowledge" data-id="${id}">Acknowledge</button>` : ""}
+        ${verified.active && account === verified.reader ? `<button class="secondary" data-action="release" data-id="${id}">Release early</button>` : ""}
         ${explorer ? `<a href="${explorer}" target="_blank" rel="noopener noreferrer">View vault on explorer ↗</a>` : ""}
         ${issuingTransaction ? `<a href="${chain.explorer}/tx/${issuingTransaction}" target="_blank" rel="noopener noreferrer">View issuing transaction ↗</a>` : ""}
       </div>
@@ -434,6 +439,7 @@ async function transact(action, { data, id } = {}) {
   }
   if (action === "revoke") tx = await sendVault("revokeEarmark", id);
   if (action === "acknowledge") tx = await sendVault("acknowledge", id);
+  if (action === "release") tx = await sendVault("releaseEarmark", id);
   alert("Waiting for transaction confirmation…");
   const receipt = await tx.wait();
   let noteLink;

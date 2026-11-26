@@ -222,6 +222,13 @@ try {
   await visit("/proof/1", null, doc => until(() => doc.body.textContent.includes("uses a different token")),
     { fixture: "wrongtoken" });
   await visit("/proof/999", null, doc => until(() => doc.querySelector("h1")?.textContent === "Proof not found"));
+  await visit(scoped(3), reader, async doc => {
+    await until(() => doc.querySelector(".status.pending"));
+    await click(doc, "#connect", () => doc.querySelector('[data-action="release"]'));
+    await click(doc, '[data-action="release"]', () => doc.querySelector(".status.released"));
+    assert.equal(doc.querySelector(".status").textContent, "Released early by the reader");
+    assert.equal(doc.querySelector('[data-action="release"]'), null);
+  });
   await rpc.send("evm_setNextBlockTimestamp", [expiry]);
   await rpc.send("evm_mine", []);
   await visit("/proof/1", null, async doc => {
@@ -253,7 +260,7 @@ try {
   await assert.rejects(() => createNameAdapter(1983).resolve("reader.qie"), /unavailable/);
   assert.equal(await createNameAdapter(1990, async () => reader).resolve("reader.qie"), reader);
 
-  console.log("Local UI integration passed: mint, approve, deposit, issue, protected withdrawal, revoke, all proof statuses, confirmation link and Copy, note sharing and tamper detection, issuing transaction and vault links, scoped proof links and wrong-vault links, deployment checks (missing vault, wrong token), shared note display, read block stamp, dashboard refresh, honest held wording, expiry, mainnet mint visibility, plain issue errors, missing proof and name adapter.");
+  console.log("Local UI integration passed: mint, approve, deposit, issue, protected withdrawal, revoke, all proof statuses, confirmation link and Copy, note sharing and tamper detection, issuing transaction and vault links, scoped proof links and wrong-vault links, deployment checks (missing vault, wrong token), shared note display, read block stamp, dashboard refresh, honest held wording, reader early release, expiry, mainnet mint visibility, plain issue errors, missing proof and name adapter.");
 
   async function visit(path, walletAddress, scenario, { fixture = "local" } = {}) {
     const { window } = parseHTML(await read(path));

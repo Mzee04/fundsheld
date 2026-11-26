@@ -80,7 +80,7 @@ describe("FundsHeldVault", function () {
     const id = await issue(unit(75), expiry, readerAddress, memoHash);
     await issue(unit(25), expiry, otherAddress);
     assert.deepEqual(Array.from(await vault.verify(id)), [ownerAddress, readerAddress, unit(75), expiry,
-      memoHash, false, false, true, 0n, unit(100), unit(100)]);
+      memoHash, false, false, false, true, 0n, unit(100), unit(100)]);
     await advance(expiry);
     assert.equal((await vault.verify(id)).active, false);
     assert.equal((await vault.verify(id)).status, 2n);
@@ -221,7 +221,7 @@ describe("FundsHeldVault", function () {
     assert.equal(BigInt(revokedWord), pending | (1n << 232n));
   });
 
-  it("rejects fee-on-transfer deposits and checks vault-side withdrawal delta only", async function () {
+  it("rejects fee-on-transfer deposits and withdrawals that short the owner", async function () {
     const feeToken = await deploy("FeeToken");
     await feeToken.waitForDeployment();
     const asset = await feeToken.getAddress();
@@ -235,10 +235,59 @@ describe("FundsHeldVault", function () {
     await rejects(target.deposit.staticCall(asset, 20n), "UnexpectedTokenTransfer");
     assert.equal(await target.lockedBalance(ownerAddress), 50n);
     assert.equal(await feeToken.balanceOf(address), 50n);
-    await send(target.withdraw(20n));
-    assert.equal(await target.lockedBalance(ownerAddress), 30n);
-    assert.equal(await feeToken.balanceOf(address), 30n);
-    assert.equal(await feeToken.balanceOf(ownerAddress), 69n);
+    await rejects(target.withdraw.staticCall(20n), "UnexpectedTokenTransfer");
+    assert.equal(await target.lockedBalance(ownerAddress), 50n);
+    assert.equal(await feeToken.balanceOf(address), 50n);
+  });
+
+  it("lets only the named reader release an active earmark early, pending or locked", async function () {
+    const expiry = await now() + 500n;
+    const pendingId = await issue(unit(40), expiry);
+    const lockedId = await issue(unit(60), expiry);
+    await send(vault.connect(reader).acknowledge(lockedId));
+    assert.equal(await vault.freeBalance(ownerAddress), 0n);
+    await rejects(vault.releaseEarmark.staticCall(lockedId), "Unauthorized");
+    await rejects(vault.connect(other).releaseEarmark.staticCall(lockedId), "Unauthorized");
+    assertEvent(vault, await send(vault.connect(reader).releaseEarmark(lockedId)), "EarmarkReleased",
+      [lockedId, ownerAddress, readerAddress, unit(60)]);
+    const released = await vault.verify(lockedId);
+    assert.equal(released.released, true);
+    assert.equal(released.active, false);
+    assert.equal(released.status, 4n);
+    assert.equal(await vault.freeBalance(ownerAddress), unit(60));
+    await rejects(vault.connect(reader).releaseEarmark.staticCall(lockedId), "InactiveEarmark");
+    await rejects(vault.revokeEarmark.staticCall(lockedId), "InactiveEarmark");
+    await send(vault.connect(reader).releaseEarmark(pendingId));
+    assert.equal((await vault.verify(pendingId)).status, 4n);
+    assert.equal(await vault.freeBalance(ownerAddress), unit(100));
+    const shortLived = await issue(unit(1), await now() + 5n);
+    await advance(await now() + 5n);
+    await rejects(vault.connect(reader).releaseEarmark.staticCall(shortLived), "InactiveEarmark");
+    await send(vault.withdraw(unit(100)));
+    assert.equal(await vault.lockedBalance(ownerAddress), 0n);
+  });
+
+  it("prunes expired, revoked and released earmarks from the active list", async function () {
+    const expiry = await now() + 1000n;
+    for (let index = 0; index < 64; index++) await issue(unit(1), expiry);
+    assert.equal(await vault.activeEarmarkSlots(ownerAddress), 64n);
+    await send(vault.revokeEarmark(5n));
+    await send(vault.connect(reader).releaseEarmark(9n));
+    assertEvent(vault, await send(vault.connect(other).pruneEarmarks(ownerAddress)), "EarmarksPruned", [ownerAddress, 2n]);
+    assert.equal(await vault.activeEarmarkSlots(ownerAddress), 62n);
+    assert.equal(await vault.freeBalance(ownerAddress), unit(38));
+    await advance(expiry);
+    assert.equal(await vault.activeEarmarkSlots(ownerAddress), 62n);
+    const fresh = await issue(unit(10), expiry + 100n);
+    assert.equal(fresh, 65n);
+    assert.equal(await vault.activeEarmarkSlots(ownerAddress), 1n);
+    assert.equal(await vault.freeBalance(ownerAddress), unit(90));
+    const receipt = await send(vault.pruneEarmarks(ownerAddress));
+    assert.equal(receipt.logs.length, 0);
+    assert.equal(await vault.earmarkCount(ownerAddress), 65n);
+    assert.equal((await vault.verify(5n)).status, 3n);
+    assert.equal((await vault.verify(9n)).status, 4n);
+    assert.equal((await vault.verify(10n)).status, 2n);
   });
 
   for (const seed of Array.from({ length: 24 }, (_, index) => 11 + index * 19)) {

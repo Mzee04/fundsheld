@@ -12,13 +12,14 @@ contract FundsHeldVault is ReentrancyGuard {
     uint256 public constant MAX_DURATION = 366 days;
     IERC20 public immutable token;
 
-    enum Status { Pending, Locked, Expired, Revoked }
+    enum Status { Pending, Locked, Expired, Revoked, Released }
 
     struct Earmark {
         address owner;
         uint64 expiry;
         bool acknowledged;
         bool revoked;
+        bool released;
         address reader;
         uint128 amount;
         bytes32 memoHash;
@@ -32,6 +33,7 @@ contract FundsHeldVault is ReentrancyGuard {
         bytes32 memoHash;
         bool acknowledged;
         bool revoked;
+        bool released;
         bool active;
         Status status;
         uint256 ownerLockedBalance;
@@ -62,6 +64,8 @@ contract FundsHeldVault is ReentrancyGuard {
     event EarmarkIssued(uint256 indexed id, address indexed owner, address indexed reader, uint256 amount, uint64 expiry, bytes32 memoHash);
     event EarmarkRevoked(uint256 indexed id, address indexed owner, address indexed reader, uint256 amount);
     event EarmarkAcknowledged(uint256 indexed id, address indexed reader);
+    event EarmarkReleased(uint256 indexed id, address indexed owner, address indexed reader, uint256 amount);
+    event EarmarksPruned(address indexed owner, uint256 removed);
 
     constructor(IERC20 asset) {
         if (address(asset).code.length == 0) revert InvalidToken();
@@ -83,8 +87,10 @@ contract FundsHeldVault is ReentrancyGuard {
         if (amount > freeBalance(msg.sender)) revert InsufficientFreeBalance();
         lockedBalance[msg.sender] -= amount;
         uint256 beforeVault = token.balanceOf(address(this));
+        uint256 beforeOwner = token.balanceOf(msg.sender);
         token.safeTransfer(msg.sender, amount);
         if (token.balanceOf(address(this)) != beforeVault - amount) revert UnexpectedTokenTransfer();
+        if (token.balanceOf(msg.sender) != beforeOwner + amount) revert UnexpectedTokenTransfer();
         emit Withdrawn(msg.sender, address(token), amount);
     }
 
@@ -95,21 +101,14 @@ contract FundsHeldVault is ReentrancyGuard {
         if (amount == 0 || amount > type(uint128).max) revert InvalidAmount();
         if (expiry <= block.timestamp || expiry > block.timestamp + MAX_DURATION) revert InvalidExpiry();
 
+        (, uint256 reserved) = _prune(msg.sender);
         uint256[] storage candidates = activeCandidates[msg.sender];
-        uint256 reserved;
-        uint256 slot = candidates.length;
-        for (uint256 i; i < candidates.length; ++i) {
-            Earmark storage candidate = earmarks[candidates[i]];
-            if (_active(candidate)) reserved += candidate.amount;
-            else slot = i;
-        }
         if (amount > lockedBalance[msg.sender] - reserved) revert InsufficientFreeBalance();
-        if (slot == MAX_ACTIVE_EARMARKS) revert TooManyActiveEarmarks();
+        if (candidates.length == MAX_ACTIVE_EARMARKS) revert TooManyActiveEarmarks();
 
         id = ++lastId;
-        earmarks[id] = Earmark(msg.sender, expiry, false, false, reader, uint128(amount), memoHash);
-        if (slot == candidates.length) candidates.push(id);
-        else candidates[slot] = id;
+        earmarks[id] = Earmark(msg.sender, expiry, false, false, false, reader, uint128(amount), memoHash);
+        candidates.push(id);
         history[msg.sender].push(id);
         emit EarmarkIssued(id, msg.sender, reader, amount, expiry, memoHash);
     }
@@ -133,6 +132,24 @@ contract FundsHeldVault is ReentrancyGuard {
         emit EarmarkAcknowledged(id, msg.sender);
     }
 
+    /// @notice The named reader gives up the hold early. The funds return to the owner's free balance.
+    function releaseEarmark(uint256 id) external nonReentrant {
+        Earmark storage mark = _get(id);
+        if (mark.reader != msg.sender) revert Unauthorized();
+        if (!_active(mark)) revert InactiveEarmark();
+        mark.released = true;
+        emit EarmarkReleased(id, mark.owner, msg.sender, mark.amount);
+    }
+
+    /// @notice Remove expired, revoked and released earmarks from an owner's active list. Anyone may call it.
+    function pruneEarmarks(address owner) external nonReentrant returns (uint256 removed) {
+        (removed, ) = _prune(owner);
+    }
+
+    function activeEarmarkSlots(address owner) external view returns (uint256) {
+        return activeCandidates[owner].length;
+    }
+
     function verify(uint256 id) external view returns (Verification memory proof) {
         Earmark storage mark = _get(id);
         proof.owner = mark.owner;
@@ -142,8 +159,10 @@ contract FundsHeldVault is ReentrancyGuard {
         proof.memoHash = mark.memoHash;
         proof.acknowledged = mark.acknowledged;
         proof.revoked = mark.revoked;
+        proof.released = mark.released;
         proof.active = _active(mark);
         if (proof.revoked) proof.status = Status.Revoked;
+        else if (proof.released) proof.status = Status.Released;
         else if (!proof.active) proof.status = Status.Expired;
         else if (proof.acknowledged) proof.status = Status.Locked;
         proof.ownerLockedBalance = lockedBalance[proof.owner];
@@ -170,12 +189,32 @@ contract FundsHeldVault is ReentrancyGuard {
         return history[owner][index];
     }
 
+    /// @dev Swap-and-pop inactive entries; returns how many were removed and the active total that remains.
+    function _prune(address owner) private returns (uint256 removed, uint256 reserved) {
+        uint256[] storage candidates = activeCandidates[owner];
+        uint256 length = candidates.length;
+        uint256 i;
+        while (i < length) {
+            Earmark storage mark = earmarks[candidates[i]];
+            if (_active(mark)) {
+                reserved += mark.amount;
+                ++i;
+            } else {
+                --length;
+                candidates[i] = candidates[length];
+                candidates.pop();
+                ++removed;
+            }
+        }
+        if (removed != 0) emit EarmarksPruned(owner, removed);
+    }
+
     function _get(uint256 id) private view returns (Earmark storage mark) {
         mark = earmarks[id];
         if (mark.owner == address(0)) revert UnknownEarmark();
     }
 
     function _active(Earmark storage mark) private view returns (bool) {
-        return !mark.revoked && block.timestamp < mark.expiry;
+        return !mark.revoked && !mark.released && block.timestamp < mark.expiry;
     }
 }
