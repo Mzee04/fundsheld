@@ -1,6 +1,6 @@
 Prove you have the money to one person at a time, never to two at once.
 
-Ada deposits 5,000 QUSDC and gives Landlord A a proof link earmarking all 5,000. While the earmark is pending, Ada can revoke it. Landlord A acknowledges the proof, locking the full 5,000 for them until expiry. Ada then tries to earmark the same funds for Landlord B, and FundsHeld refuses because her free balance is zero.
+Ada deposits 5,000 QUSDC and gives Landlord A a proof link earmarking all 5,000. While the earmark is pending, Ada can revoke it. Landlord A acknowledges the proof, which keeps the full 5,000 held in the vault for them until expiry. Landlord A cannot claim or withdraw the money; it only shows that Ada cannot spend it or promise it to anyone else before expiry. Ada then tries to earmark the same funds for Landlord B, and FundsHeld refuses because her free balance is zero.
 
 - Live URL — TBD
 - Mainnet vault (verified): [0xd8e94A1f60F2DE2899297D5583b8C6Cd279d68d8](https://mainnet.qie.digital/address/0xd8e94A1f60F2DE2899297D5583b8C6Cd279d68d8) on QIE Mainnet (chain 1990). Demo transactions: [DEMO_TXS.md](DEMO_TXS.md)
@@ -14,23 +14,37 @@ Ada deposits 5,000 QUSDC and gives Landlord A a proof link earmarking all 5,000.
 | --- | --- |
 | Balance-based proof | An owner had a balance at a point in time. The same balance can appear in multiple reports. |
 | Token locker | Funds are restricted under locker rules. Conventional lockers do not allocate slices to individual readers. |
-| FundsHeld | A bounded slice of funds is reserved on-chain for one reader. The contract rejects overlapping use of funds or withdrawals of reserved funds. |
+| FundsHeld | A bounded slice of funds is set aside on-chain for one reader until expiry. The contract rejects overlapping use of those funds and withdrawals of them. The reader cannot claim them. |
 
 - **Pending.** The slice counts against the owner's free balance. The owner can still cancel it.
-- **Locked.** The named reader acknowledged before expiry. The owner cannot cancel or withdraw that slice until expiry.
+- **Locked.** The named reader acknowledged before expiry. The owner cannot cancel or withdraw that slice until expiry. The reader cannot claim it either; at expiry it returns to the owner's free balance.
 - **Expired.** The slice became free at its expiry block timestamp. No cleanup transaction is required.
 - **Revoked.** The owner canceled a pending slice before expiry. It remains visible in the certificate history.
 
-The owner retains withdrawal rights. The reader can verify and acknowledge the reservation. The public page reports on-chain reserved funds, the reader, the expiry, and the vault and issuing transaction links on supported explorers.
+The owner keeps ownership and gets the funds back at expiry. The reader can verify and acknowledge the reservation, but FundsHeld is not escrow and never pays the reader. The public page reports the amount held for the reader, the reader, the expiry, the shared note when the link carries it, the block it was read at, and the vault and issuing transaction links on supported explorers.
 
 ## Architecture and limits
 
 - `FundsHeldVault.sol` is a non-upgradeable, single-token vault with balances separated by owner. `verify(id)` returns the proof, status, owner locked balance, and total owner reserved balance in one read. Both token transfer directions check vault balance deltas. **Fee-on-transfer and rebasing tokens are unsupported.**
 - Each owner can maintain **64 active earmarks**. An earmark can last at most **366 days** and can reserve up to `uint128.max` base units. The reader must be a nonzero address distinct from the owner and the vault.
-- The reader, owner, amount, expiry, and history are public. Proof IDs are enumerable and scoped to a specific vault deployment. Keep the hosted app pointed at the same vault if you share its links.
-- Optional notes are committed on-chain as a salted hash. **Copy link with note** adds the note and salt to the URL fragment for verification. **Copy link without note** omits both. Anyone who receives a note link can read and forward the note. The owner app saves note data in that browser's local storage so it can recreate the link later.
-- The Vite frontend reads deployment addresses and units from `web/deployments/<chainId>.json` and uses RPC failover on QIE. The name adapter accepts wallet addresses and has a resolver hook for future `.qie` integration. Mainnet uses the configured QUSDC without a mint control. MockQUSDC is deployable only on testnet or the local Hardhat chain.
+- The reader, owner, amount, expiry, and history are public. Proof IDs are enumerable and scoped to a specific vault deployment. Proof links carry `?chain=<id>&vault=<address>`; the app refuses to show a link that names a different chain or vault. Older links without these fields still open against the configured vault, and the page always shows which network and vault it read.
+- Optional notes are committed on-chain as a salted hash. **Copy link with note** adds the note and salt to the URL fragment. The proof page shows the note text only when it matches the on-chain hash. **Copy link without note** omits both. Anyone who receives a note link can read and forward the note. The owner app saves note data in that browser's local storage so it can recreate the link later.
+- The Vite frontend reads deployment addresses and units from `web/deployments/<chainId>.json`. Before showing data it checks that the vault has code on the network and that its `token()` matches the configured token. Each read asks every configured QIE RPC for its chain ID and latest block, reads proofs at the lowest common block on every endpoint that answered, and shows an error if they disagree. The page shows the block number and how many endpoints agreed. The issuing transaction lookup is cached in the browser per chain, vault and proof. The owner dashboard refreshes balances every 12 seconds (skipped while you are typing) and has a **Refresh balances** button. The name adapter accepts wallet addresses and has a resolver hook for future `.qie` integration. Mainnet uses the configured QUSDC without a mint control. MockQUSDC is deployable only on testnet or the local Hardhat chain.
 - QIE's wallet-facing developer settings list **QIE** with 18 decimals as the mainnet native currency. The chain-access documentation also uses the label QIEV3. [QIE developer wallet settings](https://www.qie.digital/developers) · [QIE chain-access docs](https://docs.qie.digital/getting-started-with-qie-blockchain/4.-access-mainnet-or-testnet)
+
+## Known limitations
+
+These are contract-level items from code review. They need a new vault deployment, so they are **not** in the live mainnet vault `0xd8e94A1f60F2DE2899297D5583b8C6Cd279d68d8`. An implementation with tests is kept on the unmerged `contract-v2` branch and has not been deployed.
+
+- **No early release by the reader.** A reader who no longer needs the hold cannot release it before expiry. The owner waits for expiry.
+- **Withdrawals check only the vault's balance change**, not the amount the owner's wallet receives. This is safe for standard ERC-20 tokens such as QUSDC; fee-on-transfer and rebasing tokens are unsupported.
+- **Expired or revoked earmarks are not pruned from the owner's active list.** Their slots are reused by later issues, so the 64-slot limit still holds, but issue and balance reads loop over up to 64 entries.
+- **Single token, no upgrades, no admin.** A new token or contract change means a new vault and new proof links.
+- **Notes in links are readable by anyone with the link.** Share the link with note only with the reader.
+
+## Continuous integration
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push to `main` and on pull requests: `npm ci`, contract compile, `npm test`, `npm run test:ui`, and `npm run build`.
 
 ## Local development
 

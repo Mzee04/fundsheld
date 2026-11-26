@@ -56,3 +56,6 @@ dd { margin: 0; overflow-wrap: anywhere; }
   .balances, .grid, dl { grid-template-columns: 1fr; }
   dd { margin-bottom: .3rem; }
 }
+.honest { border-left: 3px solid currentColor; padding-left: .75rem; }
+.note-text { white-space: pre-wrap; word-break: break-word; font-weight: 600; }
+.read-stamp { font-size: .85rem; margin-top: 1rem; }

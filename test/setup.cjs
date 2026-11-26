@@ -80,4 +80,48 @@ describe("Deployment and web configuration", function () {
     assert.equal(noteVerdict("#n=test&s=0x12", committed), "Note does not match");
     assert.equal(noteVerdict(new URL(proofLink(url.origin, 12)).hash, committed), "");
   });
+
+  it("binds proof links to one chain and vault and shows the committed note text", async function () {
+    const { proofLink, linkScope, readNote } = await import("../web/notes.mjs");
+    const vault = "0xd8e94A1f60F2DE2899297D5583b8C6Cd279d68d8";
+    const scope = { chainId: 1990, vault };
+    const note = { note: "Rent for flat 2B", salt: `0x${"34".repeat(32)}` };
+    const url = new URL(proofLink("https://example.com", 7, note, scope));
+    assert.equal(url.pathname, "/proof/7");
+    assert.equal(url.searchParams.get("chain"), "1990");
+    assert.equal(url.searchParams.get("vault"), vault);
+    assert.equal(linkScope(url.search, scope), "match");
+    assert.equal(linkScope(url.search.toLowerCase(), scope), "match");
+    assert.equal(linkScope("", scope), "");
+    assert.equal(linkScope("?chain=1983&vault=" + vault, scope), "mismatch");
+    assert.equal(linkScope("?chain=1990&vault=0x0000000000000000000000000000000000000001", scope), "mismatch");
+    assert.equal(linkScope("?chain=1990", scope), "mismatch");
+    assert.equal(linkScope("?chain=1990&vault=nonsense", scope), "mismatch");
+    const { noteHash } = await import("../web/notes.mjs");
+    assert.deepEqual(readNote(url.hash, noteHash(note)), { verdict: "Note matches", note: "Rent for flat 2B" });
+    assert.deepEqual(readNote(url.hash, ZeroHash), { verdict: "Note does not match" });
+    assert.deepEqual(readNote("", ZeroHash), { verdict: "" });
+  });
+
+  it("reads at a block every endpoint has and flags endpoints that disagree", async function () {
+    const { consistentBlock, crossCheck } = await import("../web/network.mjs");
+    const fake = (chainId, block) => ({ send: async () => chainId, getBlockNumber: async () => block });
+    const down = { send: async () => { throw Error("down"); }, getBlockNumber: async () => { throw Error("down"); } };
+    const a = fake("0x7c6", 120), b = fake("0x7c6", 118), wrong = fake("0x1", 500);
+    const at = await consistentBlock([a, b, wrong, down], 1990);
+    assert.equal(at.blockTag, 118);
+    assert.deepEqual(at.live, [a, b]);
+    assert.equal(at.total, 4);
+    await assert.rejects(consistentBlock([wrong, down], 1990), /No RPC endpoint/);
+    const same = await crossCheck([a, b], async () => ({ amount: 5n }));
+    assert.deepEqual([same.agreeing, same.checked, same.conflict], [2, 2, false]);
+    let call = 0;
+    const split = await crossCheck([a, b], async () => ({ amount: BigInt(++call) }));
+    assert.equal(split.conflict, true);
+    const partial = await crossCheck([a, down], async provider => {
+      if (provider === down) throw Error("down");
+      return 1n;
+    });
+    assert.deepEqual([partial.checked, partial.conflict], [1, false]);
+  });
 });

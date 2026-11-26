@@ -3,8 +3,8 @@ import networks from "../network.json";
 import vaultArtifact from "../artifacts/contracts/FundsHeldVault.sol/FundsHeldVault.json";
 import tokenArtifact from "../artifacts/contracts/MockQUSDC.sol/MockQUSDC.json";
 import { createNameAdapter } from "./names.js";
-import { createRpc, selectChain } from "./network.mjs";
-import { noteHash, noteVerdict, proofLink } from "./notes.mjs";
+import { consistentBlock, createRpcSet, crossCheck, selectChain } from "./network.mjs";
+import { linkScope, noteHash, proofLink, readNote } from "./notes.mjs";
 import "./style.css";
 
 const deployments = import.meta.glob("./deployments/*.json", { eager: true, import: "default" });
@@ -16,12 +16,15 @@ const configured = Boolean(deployment?.vault && deployment?.token && deployment.
   Number.isSafeInteger(deployment.deploymentBlock) && deployment.deploymentBlock >= 0);
 const isMainnet = chain.chainId === networks.mainnet.chainId;
 const names = createNameAdapter(chain.chainId);
-const rpc = createRpc(chain);
+const { rpc, providers } = createRpcSet(chain);
 const wallet = window.qie ?? window.ethereum;
 const vault = configured ? new Contract(deployment.vault, vaultArtifact.abi, rpc) : null;
 const token = configured ? new Contract(deployment.token, tokenArtifact.abi, rpc) : null;
 const notes = new Map();
+const scope = configured ? { chainId: chain.chainId, vault: getAddress(deployment.vault) } : null;
 let issuingTransaction;
+let deploymentCheck;
+let lastRead;
 const content = document.querySelector("#content");
 const connect = document.querySelector("#connect");
 const message = document.querySelector("#message");
@@ -32,6 +35,7 @@ const path = location.pathname;
 const proof = path.match(/^\/proof\/([1-9][0-9]{0,77})\/?$/);
 const proofId = proof && BigInt(proof[1]) < 2n ** 256n ? proof[1] : null;
 const isProofPath = path.startsWith("/proof");
+const scopeVerdict = configured && proofId ? linkScope(location.search ?? "", scope) : "";
 const pageSize = 10n;
 const explorer = chain.explorer && configured ? `${chain.explorer}/address/${getAddress(deployment.vault)}` : "";
 let account;
@@ -54,6 +58,18 @@ function getNote(id) {
   try { return JSON.parse(window.localStorage.getItem(noteKey(id))); }
   catch { return null; }
 }
+const txKey = id => `fundsheld:${chain.chainId}:${deployment.vault}:issued:${id}`;
+function cachedIssuingTransaction(id) {
+  try {
+    const hash = window.localStorage.getItem(txKey(id));
+    return /^0x[0-9a-f]{64}$/i.test(hash ?? "") ? hash : undefined;
+  } catch { return undefined; }
+}
+function cacheIssuingTransaction(id, hash) {
+  try { window.localStorage.setItem(txKey(id), hash); }
+  catch { /* The lookup runs again on the next visit. */ }
+}
+const shareLink = (id, note) => proofLink(location.origin, id, note, scope);
 function saveNote(id, note) {
   notes.set(String(id), note);
   try { window.localStorage.setItem(noteKey(id), JSON.stringify(note)); }
@@ -98,71 +114,127 @@ const errorMessages = {
   ERC20InvalidSpender: "The spender address is invalid.",
   UnsupportedChain: "The mock token is unavailable on this network.",
   ReentrancyGuardReentrantCall: "The vault is already processing an action.",
+  VaultMissing: "No vault contract was found at the configured address on this network.",
+  TokenMismatch: "The vault on this network uses a different token than the app expects.",
+  RpcConflict: "The RPC endpoints returned different data for the same block. Try again shortly.",
 };
 function errorText(error) {
-  return errorMessages[revertName(error)] ?? error.shortMessage ?? error.message ?? "Something went wrong.";
+  return errorMessages[error.code] ?? errorMessages[revertName(error)] ?? error.shortMessage ?? error.message ?? "Something went wrong.";
 }
 function statusBadge(mark) {
   const labels = ["Pending — owner can still cancel", `Locked for the named reader until ${date(mark.verified.expiry)}`, "Expired", "Revoked"];
+  if (!(mark.status in labels)) return '<span class="status expired">Unknown status</span>';
   return `<span class="status ${["pending", "locked", "expired", "revoked"][mark.status]}">${labels[mark.status]}</span>`;
 }
 
+function codedError(code) {
+  const error = Error(errorMessages[code]);
+  error.code = code;
+  return error;
+}
+
+// Before showing any chain data, confirm the configured vault exists on this network and holds the configured token.
+async function checkDeployment(at) {
+  const [vaultCode, tokenCode] = await Promise.all([
+    rpc.getCode(deployment.vault, at.blockTag), rpc.getCode(deployment.token, at.blockTag),
+  ]);
+  if (vaultCode === "0x") throw codedError("VaultMissing");
+  let vaultToken;
+  try { vaultToken = await vault.token({ blockTag: at.blockTag }); }
+  catch { throw codedError("VaultMissing"); }
+  if (tokenCode === "0x" || getAddress(vaultToken) !== getAddress(deployment.token)) throw codedError("TokenMismatch");
+}
+
 async function snapshot() {
-  if ((await rpc.getNetwork()).chainId !== BigInt(chain.chainId)) throw Error("The RPC returned the wrong network.");
-  return { blockTag: await rpc.getBlockNumber() };
+  const at = await consistentBlock(providers, chain.chainId);
+  if (!deploymentCheck) deploymentCheck = checkDeployment(at).catch(error => { deploymentCheck = undefined; throw error; });
+  await deploymentCheck;
+  lastRead = { block: at.blockTag, checked: at.live.length, total: at.total };
+  return at;
 }
 
 async function readMark(id, at) {
-  const verified = await vault.verify(id, at);
+  const check = await crossCheck(at.live, provider => vault.connect(provider).verify(id, { blockTag: at.blockTag })
+    .then(result => result.toObject()));
+  if (check.conflict) throw codedError("RpcConflict");
+  lastRead = { block: at.blockTag, checked: check.checked, total: at.total };
+  const verified = check.value;
   return { id, verified, status: Number(verified.status) };
 }
 
+function readStamp() {
+  if (!lastRead) return "";
+  const sources = lastRead.total > 1
+    ? ` · ${lastRead.checked} of ${lastRead.total} RPC endpoints ${lastRead.checked > 1 ? "agree" : "answered"}` : "";
+  return `<p class="muted read-stamp">Read from ${escapeHtml(chain.name)} at block ${lastRead.block}${sources}.</p>`;
+}
+
 async function findIssuingTransaction(id, latest) {
+  const cached = cachedIssuingTransaction(id);
+  if (cached) return cached;
   const start = deployment.deploymentBlock;
   const filter = vault.filters.EarmarkIssued(id);
   for (let end = latest; end >= start; end -= 5000) {
     const events = await vault.queryFilter(filter, Math.max(start, end - 4999), end);
-    if (events.length) return events[0].transactionHash;
+    if (events.length) {
+      cacheIssuingTransaction(id, events[0].transactionHash);
+      return events[0].transactionHash;
+    }
   }
+}
+
+function noteRow(verified) {
+  const { verdict, note } = readNote(location.hash, verified.memoHash);
+  if (verdict === "Note matches") {
+    return `<dt>Shared note</dt><dd><span class="note-text">${escapeHtml(note)}</span> <span class="muted">(matches the on-chain hash)</span></dd>`;
+  }
+  if (verdict) return `<dt>Shared note</dt><dd>Note does not match the on-chain hash. Do not trust this note.</dd>`;
+  if (verified.memoHash !== ZeroHash) return "<dt>Shared note</dt><dd>A note was committed. Ask the owner for the link with the note to read it.</dd>";
+  return "";
 }
 
 function showProof(mark) {
   const { verified, id } = mark;
-  const verdict = noteVerdict(location.hash, verified.memoHash);
   const canAcknowledge = verified.active && !verified.acknowledged && account === verified.reader;
+  const heldValue = verified.active ? verified.amount : 0n;
+  const heldLabel = !verified.active ? "Held for this reader now"
+    : verified.acknowledged ? "Held for this reader until expiry" : "Set aside now (owner can still cancel)";
   return `
     <section class="intro"><p class="eyebrow">Public certificate</p><h1>Proof #${id}</h1>
-    <p>Verify the named reader and the on-chain reservation.</p></section>
+    <p>Check who the funds are held for, how much, and until when.</p></section>
     <article class="panel proof">
       ${statusBadge(mark)}
-      <p class="label">On-chain reserved funds</p>
-      <p class="value">${units(verified.active ? verified.amount : 0n)}</p>
+      <p class="label">${heldLabel}</p>
+      <p class="value">${units(heldValue)}</p>
       <dl>
         <dt>Certificate amount</dt><dd>${units(verified.amount)}</dd>
         <dt>Reader</dt><dd>${names.display(verified.reader)}</dd>
-        <dt>Vault owner</dt><dd>${verified.owner}</dd>
+        <dt>Vault owner</dt><dd>${getAddress(verified.owner)}</dd>
         <dt>Expiry</dt><dd>${date(verified.expiry)}</dd>
         <dt>Reader acknowledgment</dt><dd>${verified.acknowledged ? "Acknowledged" : "Pending"}</dd>
-        <dt>Owner’s current locked balance</dt><dd>${units(verified.ownerLockedBalance)}</dd>
-        <dt>Owner’s total reserved balance</dt><dd>${units(verified.ownerReservedBalance)}</dd>
-        ${verdict ? `<dt>Shared note</dt><dd>${verdict}</dd>` : ""}
+        <dt>Owner’s total deposit in vault</dt><dd>${units(verified.ownerLockedBalance)}</dd>
+        <dt>Owner’s total set aside for readers</dt><dd>${units(verified.ownerReservedBalance)}</dd>
+        <dt>Network and vault</dt><dd>${escapeHtml(chain.name)} (chain ${chain.chainId}) · ${scope.vault}</dd>
+        ${noteRow(verified)}
       </dl>
-      <p>Funds are guaranteed held only after the named reader acknowledges.</p>
+      <p class="honest">After the named reader acknowledges, these funds stay in the vault for that reader until expiry: the owner cannot withdraw or cancel them before then. The reader cannot claim or withdraw them. At expiry they return to the owner’s free balance. Before acknowledgment, the owner can cancel at any time.</p>
       <div class="actions">
         ${canAcknowledge ? `<button data-action="acknowledge" data-id="${id}">Acknowledge</button>` : ""}
         ${explorer ? `<a href="${explorer}" target="_blank" rel="noopener noreferrer">View vault on explorer ↗</a>` : ""}
         ${issuingTransaction ? `<a href="${chain.explorer}/tx/${issuingTransaction}" target="_blank" rel="noopener noreferrer">View issuing transaction ↗</a>` : ""}
       </div>
       ${verified.active && !verified.acknowledged
-        ? `<p class="muted">${canAcknowledge ? "Acknowledging prevents the owner from revoking the earmark before expiry."
+        ? `<p class="muted">${canAcknowledge ? "Acknowledging stops the owner from cancelling this earmark before expiry. It does not let you withdraw the funds."
           : account ? "Only the named reader can acknowledge this earmark." : "Connect the named reader’s wallet to acknowledge."}</p>` : ""}
+      ${readStamp()}
     </article>`;
 }
 
 const intro = `<section class="intro"><p class="eyebrow">Proof of funds</p><h1>Reserve funds.<br>Show the proof.</h1>
-  <p>Lock ${isMainnet ? "funds" : "test tokens"} and reserve a slice for one reader until a set expiry.</p></section>`;
+  <p>Deposit ${isMainnet ? "funds" : "test tokens"} and set a slice aside for one reader until a set expiry. You keep ownership; the reader can verify it but cannot claim it.</p></section>`;
 
-async function ownerView(at) {
+async function ownerView(snap) {
+  const at = { blockTag: snap.blockTag };
   const [locked, free, count, walletBalance] = await Promise.all([
     vault.lockedBalance(account, at), vault.freeBalance(account, at),
     vault.earmarkCount(account, at), token.balanceOf(account, at),
@@ -171,9 +243,9 @@ async function ownerView(at) {
   const start = end > pageSize ? end - pageSize : 0n;
   const ids = await Promise.all(Array.from({ length: Number(end - start) }, (_, index) =>
     vault.earmarkIdAt(account, end - 1n - BigInt(index), at)));
-  const marks = await Promise.all(ids.map(id => readMark(id, at)));
+  const marks = await Promise.all(ids.map(id => readMark(id, snap)));
   const cards = marks.map(({ id, status, verified }) => `
-    <li><div><a href="/proof/${id}">Proof #${id}</a> ${statusBadge({ status, verified })}
+    <li><div><a href="/proof/${id}?${new URLSearchParams({ chain: String(chain.chainId), vault: scope.vault })}">Proof #${id}</a> ${statusBadge({ status, verified })}
     <p>${units(verified.amount)} · ${date(verified.expiry)}</p>
     <small title="${verified.reader}">Reader ${shortAddress(verified.reader)}${verified.acknowledged ? " · Acknowledged" : ""}</small></div>
     <div class="actions"><button class="secondary" data-action="copy" data-id="${id}">Copy link without note</button>
@@ -181,7 +253,7 @@ async function ownerView(at) {
     ${verified.active && !verified.acknowledged ? `<button class="secondary" data-action="revoke" data-id="${id}">Revoke</button>` : ""}</div></li>`).join("");
   return `${intro}
     <section class="balances" aria-label="Vault balances">
-      ${[["Locked", locked], ["Reserved", locked - free], ["Free to withdraw", free]]
+      ${[["Deposited", locked], ["Set aside for readers", locked - free], ["Free to withdraw", free]]
         .map(([label, balance]) => `<div class="panel"><p class="label">${label}</p><strong>${units(balance)}</strong></div>`).join("")}
     </section>
     <div class="grid">
@@ -189,6 +261,8 @@ async function ownerView(at) {
         <p class="muted">Wallet balance ${units(walletBalance)}</p>
         ${isMainnet ? "" : '<button class="secondary" data-action="mint">Mint 1,000 test tokens</button>'}
         <form data-action="deposit"><label>Deposit amount<input name="amount" inputmode="decimal" required></label><button>Deposit</button></form>
+        <p class="muted">Balances refresh every 12 seconds while this tab is open.</p>
+        <button class="secondary" type="button" data-action="refresh">Refresh balances</button>
         <form data-action="withdraw"><label>Withdraw amount<input name="amount" inputmode="decimal" required></label><button>Withdraw</button></form>
       </section>
       <section class="panel"><h2>Issue earmark</h2>
@@ -207,6 +281,7 @@ async function ownerView(at) {
         ${page ? '<button class="secondary" data-action="newer">Newer</button>' : ""}
         ${start ? '<button class="secondary" data-action="older">Older</button>' : ""}
       </div>` : ""}
+      ${readStamp()}
     </section>`;
 }
 
@@ -220,9 +295,12 @@ async function render({ background = false } = {}) {
       html = '<section class="intro"><h1>Proof not found</h1><p>Check the certificate link and try again.</p></section>';
     } else if (!configured) {
       html = `${intro}<section class="panel"><h2>Deployment needed</h2><p>Deploy the contracts and restart the app to connect a vault.</p></section>`;
+    } else if (proofId && scopeVerdict === "mismatch") {
+      html = `<section class="intro"><h1>Proof is for another vault</h1><p>This link names a different network or vault than this app reads (${escapeHtml(chain.name)}, vault ${scope.vault}). Open the link on the app for that vault.</p></section>`;
     } else if (proofId) {
       try {
         const at = await snapshot();
+        if (explorer) issuingTransaction ??= cachedIssuingTransaction(proofId);
         html = showProof(await readMark(proofId, at));
         if (explorer && !issuingTransaction && !issueLookup) {
           issueLookup = findIssuingTransaction(proofId, at.blockTag)
@@ -252,7 +330,7 @@ async function render({ background = false } = {}) {
   } catch (error) {
     if (run === generation) {
       renderedHtml = undefined;
-      content.innerHTML = '<section class="panel"><h1>Chain data unavailable</h1><p>Try refreshing the page.</p></section>';
+      content.innerHTML = `<section class="panel"><h1>Chain data unavailable</h1><p>${escapeHtml(errorText(error))} Try refreshing the page.</p></section>`;
       if (!background) alert(errorText(error));
     }
   } finally {
@@ -365,7 +443,7 @@ async function transact(action, { data, id } = {}) {
       const event = receipt.logs.find(log => log.fragment?.name === "EarmarkIssued");
       if (event) {
         saveNote(event.args.id, shareNote);
-        noteLink = proofLink(location.origin, event.args.id, shareNote);
+        noteLink = shareLink(event.args.id, shareNote);
       }
     }
   }
@@ -383,6 +461,7 @@ document.querySelector("#copy-confirmed-proof").addEventListener("click", async 
 });
 
 connect.addEventListener("click", () => run(walletConnect));
+wallet?.on?.("chainChanged", () => { void render(); });
 wallet?.on?.("accountsChanged", addresses => {
   setAccount(addresses[0]);
   void render();
@@ -398,8 +477,10 @@ content.addEventListener("click", event => {
   const { action, id } = button.dataset;
   void run(async () => {
     if (action === "copy" || action === "copy-note") {
-      await navigator.clipboard.writeText(proofLink(location.origin, id, action === "copy-note" ? getNote(id) : null));
+      await navigator.clipboard.writeText(shareLink(id, action === "copy-note" ? getNote(id) : null));
       alert("Proof link copied.");
+    } else if (action === "refresh") {
+      await render();
     } else if (action === "older" || action === "newer") {
       page += action === "older" ? 1n : -1n;
       await render();
@@ -416,7 +497,10 @@ async function start() {
   }
   await render();
   setInterval(() => {
-    if (!pending && proofId && configured) void render({ background: true });
+    if (pending || !configured || document.visibilityState === "hidden") return;
+    if (proofId) void render({ background: true });
+    // Refresh dashboard balances, but never wipe what the owner is typing.
+    else if (account && !Array.from(content.querySelectorAll("input")).some(input => input.value)) void render({ background: true });
   }, 12000);
 }
 

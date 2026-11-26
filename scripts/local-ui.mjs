@@ -32,6 +32,9 @@ const manifest = {
   deploymentBlock: 0,
 };
 
+const emptyAddress = "0x0000000000000000000000000000000000002003";
+const otherToken = "0x0000000000000000000000000000000000002004";
+const scoped = id => `/proof/${id}?chain=31337&vault=${manifest.vault}`;
 const build = await hre.artifacts.getBuildInfo("contracts/FundsHeldVault.sol:FundsHeldVault");
 const vaultCode = build.output.contracts["contracts/FundsHeldVault.sol"].FundsHeldVault.evm.deployedBytecode;
 const tokenWord = zeroPadValue(manifest.token, 32).slice(2);
@@ -43,6 +46,7 @@ for (const { start, length } of Object.values(vaultCode.immutableReferences).fla
 const mock = await hre.artifacts.readArtifact("MockQUSDC");
 await rpc.send("hardhat_setCode", [manifest.token, mock.deployedBytecode]);
 await rpc.send("hardhat_setCode", [manifest.vault, `0x${runtime}`]);
+await rpc.send("hardhat_setCode", [otherToken, mock.deployedBytecode]);
 // Initialize ReentrancyGuard's status slot as its constructor would.
 await rpc.send("hardhat_setStorageAt", [manifest.vault, "0x0", zeroPadValue("0x01", 32)]);
 
@@ -75,7 +79,10 @@ const server = await createServer({
     enforce: "pre",
     transform(source, id) {
       if (id.includes("/web/app.js?")) {
-        const fixtures = id.includes("unconfigured-fixture") ? {} : { "./deployments/31337.json": manifest };
+        const fixtures = id.includes("unconfigured-fixture") ? {}
+          : id.includes("novault-fixture") ? { "./deployments/31337.json": { ...manifest, vault: emptyAddress } }
+          : id.includes("wrongtoken-fixture") ? { "./deployments/31337.json": { ...manifest, token: otherToken } }
+          : { "./deployments/31337.json": manifest };
         source = source.replace('import.meta.glob("./deployments/*.json", { eager: true, import: "default" })',
           JSON.stringify(fixtures)).replace("import.meta.env.VITE_CHAIN_ID", "31337");
         if (id.includes("mainnet-fixture")) {
@@ -126,7 +133,7 @@ try {
     await submit(doc, "issue", { reader, amount: "1", expiry: tooFar, note: "" },
       () => doc.querySelector("#message").textContent.includes("within 366 days"));
     await submit(doc, "issue", { reader, amount: "300", expiry: fieldValue, note: "Local test note & # /" },
-      () => doc.querySelector('a[href="/proof/1"]'));
+      () => doc.querySelector(`a[href="${scoped(1)}"]`));
     const confirmation = doc.querySelector("#message");
     assert.equal(confirmation.hidden, false);
     assert.equal(doc.querySelector("#confirmed-proof").hidden, false);
@@ -135,6 +142,8 @@ try {
     assert.equal(shown.textContent, shown.getAttribute("href"));
     const shared = new URL(shown.getAttribute("href"));
     assert.equal(shared.pathname, "/proof/1");
+    assert.equal(shared.searchParams.get("chain"), "31337");
+    assert.equal(shared.searchParams.get("vault"), manifest.vault);
     const fragment = new URLSearchParams(shared.hash.slice(1));
     assert.equal(fragment.get("n"), "Local test note & # /");
     assert.match(fragment.get("s"), /^0x[0-9a-f]{64}$/);
@@ -147,12 +156,12 @@ try {
     assert.equal(doc.querySelector("#message-text").textContent, "Proof link copied.");
     assert.equal(shown.getAttribute("href"), clipboard);
     linkWithNote = clipboard;
-    await click(doc, '[data-action="copy"][data-id="1"]', () => clipboard?.endsWith("/proof/1"));
+    await click(doc, '[data-action="copy"][data-id="1"]', () => clipboard?.endsWith(scoped(1)));
     assert.equal(new URL(clipboard).hash, "");
     await click(doc, '[data-action="copy-note"][data-id="1"]', () => clipboard.includes("#n="));
     assert.equal(clipboard, linkWithNote);
     await submit(doc, "issue", { reader, amount: "100", expiry: fieldValue, note: "" },
-      () => doc.querySelector('a[href="/proof/2"]'));
+      () => doc.querySelector(`a[href="${scoped(2)}"]`));
     assert.equal(doc.querySelector("#confirmed-proof").hidden, true);
     assert.equal(doc.querySelector("#confirmed-proof-link").textContent, "");
     await submit(doc, "withdraw", { amount: "101" }, () => !doc.querySelector("#message").hidden &&
@@ -162,18 +171,23 @@ try {
     await click(doc, '[data-action="revoke"][data-id="2"]', () => doc.querySelector(".status.revoked"));
     assert.equal(doc.querySelector('[data-action="copy-note"][data-id="2"]'), null);
     await submit(doc, "issue", { reader, amount: "50", expiry: fieldValue, note: "" },
-      () => doc.querySelector('a[href="/proof/3"]'));
+      () => doc.querySelector(`a[href="${scoped(3)}"]`));
   });
 
   await visit(linkWithNote, null, async doc => {
     await until(() => doc.querySelector(".status.pending"));
     assert.equal(doc.querySelector(".status").textContent, "Pending — owner can still cancel");
-    assert.match(doc.body.textContent, /Funds are guaranteed held only after/);
-    assert.match(doc.body.textContent, /Note matches/);
+    assert.doesNotMatch(doc.body.textContent, /guarantee/i);
+    assert.match(doc.body.textContent, /The reader cannot claim or withdraw them/);
+    assert.equal(doc.querySelector(".note-text").textContent, "Local test note & # /");
+    assert.match(doc.body.textContent, /matches the on-chain hash/);
+    assert.match(doc.querySelector(".read-stamp").textContent, /^Read from FundsHeld Local at block \d+\.$/);
+    assert.match(doc.body.textContent, /chain 31337/);
     const [issued] = await rpc.getLogs({ address: manifest.vault, fromBlock: manifest.deploymentBlock,
       topics: [id("EarmarkIssued(uint256,address,address,uint256,uint64,bytes32)"), zeroPadValue("0x01", 32)] });
     await until(() => doc.querySelector(`a[href="${testExplorer}/tx/${issued.transactionHash}"]`));
     assert.ok(doc.querySelector(`a[href="${testExplorer}/address/${manifest.vault}"]`));
+    assert.equal(stored.get(`fundsheld:31337:${manifest.vault}:issued:1`), issued.transactionHash);
     assert.equal(doc.querySelector(".value").textContent, "300.0 mQUSDC");
     assert.ok(doc.querySelector("dl").textContent.includes(reader));
     assert.equal(doc.querySelector('[data-action="acknowledge"]'), null);
@@ -191,8 +205,22 @@ try {
   await visit(tampered.href, null, async doc => {
     await until(() => doc.querySelector(".status.locked"));
     assert.match(doc.body.textContent, /Note does not match/);
+    assert.equal(doc.querySelector(".note-text"), null);
+    assert.doesNotMatch(doc.body.textContent, /Different note/);
   });
   await visit("/proof/2", null, doc => until(() => doc.querySelector(".status.revoked")));
+  await visit("/proof/1", null, async doc => {
+    await until(() => doc.querySelector(".status.locked"));
+    assert.match(doc.body.textContent, /A note was committed/);
+  });
+  await visit("/proof/1?chain=1990&vault=" + manifest.vault, null,
+    doc => until(() => doc.querySelector("h1")?.textContent === "Proof is for another vault"));
+  await visit(`/proof/1?chain=31337&vault=${emptyAddress}`, null,
+    doc => until(() => doc.querySelector("h1")?.textContent === "Proof is for another vault"));
+  await visit("/proof/1", null, doc => until(() => doc.body.textContent.includes("No vault contract was found")),
+    { fixture: "novault" });
+  await visit("/proof/1", null, doc => until(() => doc.body.textContent.includes("uses a different token")),
+    { fixture: "wrongtoken" });
   await visit("/proof/999", null, doc => until(() => doc.querySelector("h1")?.textContent === "Proof not found"));
   await rpc.send("evm_setNextBlockTimestamp", [expiry]);
   await rpc.send("evm_mine", []);
@@ -202,7 +230,12 @@ try {
   });
 
   await visit("/", owner, async doc => {
-    await click(doc, "#connect", () => doc.querySelector('a[href="/proof/3"]'));
+    await click(doc, "#connect", () => doc.querySelector(`a[href="${scoped(3)}"]`));
+    const vaultAbi = (await hre.artifacts.readArtifact("FundsHeldVault")).abi;
+    const { Contract, JsonRpcSigner } = await import("ethers");
+    const ownerSigner = new JsonRpcSigner(rpc, owner);
+    await (await new Contract(manifest.vault, vaultAbi, ownerSigner).withdraw(1_000_000n)).wait();
+    await click(doc, '[data-action="refresh"]', () => doc.querySelector(".balances strong").textContent === "399.0 mQUSDC");
     assert.match(doc.body.textContent, /Expired/);
     assert.equal(doc.querySelector('[data-action="revoke"][data-id="3"]'), null);
     assert.ok(doc.querySelector('[data-action="copy-note"][data-id="1"]'));
@@ -212,7 +245,7 @@ try {
     await click(doc, "#connect", () => doc.querySelector(".balances"));
     assert.equal(doc.querySelector('[data-action="mint"]'), null);
     assert.doesNotMatch(doc.body.textContent, /test tokens/);
-    assert.equal(doc.querySelector(".balances strong").textContent, "400.0 mQUSDC");
+    assert.equal(doc.querySelector(".balances strong").textContent, "399.0 mQUSDC");
   }, { fixture: "mainnet" });
 
   const { createNameAdapter } = await server.ssrLoadModule("/web/names.js");
@@ -220,7 +253,7 @@ try {
   await assert.rejects(() => createNameAdapter(1983).resolve("reader.qie"), /unavailable/);
   assert.equal(await createNameAdapter(1990, async () => reader).resolve("reader.qie"), reader);
 
-  console.log("Local UI integration passed: mint, approve, deposit, issue, protected withdrawal, revoke, all proof statuses, confirmation link and Copy, note sharing and tamper detection, issuing transaction and vault links, expiry, mainnet mint visibility, plain issue errors, missing proof and name adapter.");
+  console.log("Local UI integration passed: mint, approve, deposit, issue, protected withdrawal, revoke, all proof statuses, confirmation link and Copy, note sharing and tamper detection, issuing transaction and vault links, scoped proof links and wrong-vault links, deployment checks (missing vault, wrong token), shared note display, read block stamp, dashboard refresh, honest held wording, expiry, mainnet mint visibility, plain issue errors, missing proof and name adapter.");
 
   async function visit(path, walletAddress, scenario, { fixture = "local" } = {}) {
     const { window } = parseHTML(await read(path));
